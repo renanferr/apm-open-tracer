@@ -5,62 +5,104 @@ const apm = require('elastic-apm-node')
 
 class Tracer {
 
-    //config example
-    // {
-    //     serviceName: 'apm-open-tracing',
-    //     secretToken: 'T7VeFFYRI1PXhouLB0',
-    //     serverUrl: 'https://71874f7b2b1b4145ab4ed2c2f8ac696d.apm.sa-east-1.aws.cloud.es.io:443',
-    // }
-    constructor(config) {
-        this._agent = apm.start(config)
-        this._optracer = new OpenTracer(this._agent)
+  //config example
+  // {
+  //     serviceName: 'apm-open-tracing',
+  //     secretToken: 'T7VeFFYRI1...',
+  //     serverUrl: 'https://71874f7b2....apm.sa-east-1.aws.cloud.es.io:443',
+  // }
+  constructor(config) {
+    this._agent = apm.start(config)
+    this._tracer = new OpenTracer(this._agent)
+    this.Tags = opentracing.Tags
+  }
+
+  startSpan(name, opts) {
+    return new Span(this._tracer.startSpan(name, opts))
+  }
+
+  decorateExpressMiddleware(fn) {
+    if (typeof fn !== 'function') {
+      return
     }
 
-    startSpan(name, opts) {
-        return new Span(this._optracer.startSpan(name, opts))
+    const tracer = this
+
+    return function (req, res, next) {
+
+      const span = tracer.startSpan('trace-healthcheck')
+
+      try {
+        var fnReturn = fn.call(fn, req, res, next)
+      } catch (e) {
+        console.log(e)
+        return span._handleThrownError(e)
+      }
+
+      span.setTag(tracer.Tags.COMPONENT, 'express')
+      span.setTag(tracer.Tags.HTTP_METHOD, req.method)
+      span.setTag(tracer.Tags.HTTP_URL, req.url)
+
+      const statusCode = !!fnReturn.statusCode && (typeof fnReturn.statusCode === 'number' ? fnReturn.statusCode : parseInt(fnReturn.statusCode, 10)) 
+
+      if (!!statusCode) {
+        span.setTag(tracer.Tags.HTTP_STATUS_CODE, statusCode)
+
+        if (statusCode < 200 || statusCode > 299) {
+          console.log(fnReturn)
+          // span.logError(fnReturn.body)
+        }
+      }
+
+      span.finish()
+      return fnReturn
     }
+
+  }
 }
 
 class Span {
-    constructor(openTracingSpan) {
-        this._opSpan = openTracingSpan
-        this._finished = false
-    }
+  constructor(openTracingSpan) {
+    this._span = openTracingSpan
+    this._finished = false
+  }
 
-    log(payload) {
-        this._opSpan.log(payload)
-    }
+  log(payload) {
+    this._span.log(payload)
+  }
 
-    logError(error, kind) {
-        this._opSpan.setTag(opentracing.Tags.ERROR, true)
-        const payload = { 'event': 'error', 'error.object': error, 'error.kind': kind, 'message': error.message, 'stack': error.stack }
+  logError(error, kind) {
+    this.setTag(opentracing.Tags.ERROR, true)
+    const payload = { 'event': 'error', 'error.object': error, 'error.kind': kind, 'message': error.message, 'stack': error.stack }
+    this.log(payload)
+  }
 
-        this._opSpan.log(payload)
-    }
+  _handleThrownError(error) {
+    this.logError(error)
+    this.finish()
+  }
 
-    // See: https://github.com/opentracing/specification/blob/master/semantic_conventions.md
-    setTag(tag, value) {
-        this._opSpan.setTag(tag, value)
-    }
+  // See: https://github.com/opentracing/specification/blob/master/semantic_conventions.md
+  setTag(tag, value) {
+    this._span.setTag(tag, value)
+  }
 
-    context() {
-        return this._opSpan.context()
-    }
+  context() {
+    return this._span.context()
+  }
 
-    finish() {
-        this._opSpan.finish()
-        this._setFinished(true)
-    }
+  finish() {
+    this._span.finish()
+    this._setFinished(true)
+  }
 
-    _setFinished(finished) {
-        this._finished = finished
-    }
+  _setFinished(finished) {
+    this._finished = finished
+  }
 
-    isFinished() {
-        return this._finished
-    }
+  isFinished() {
+    return this._finished
+  }
 }
-
-Tracer.Tags = opentracing.Tags
 
 module.exports = Tracer
